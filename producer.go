@@ -24,7 +24,6 @@ import (
 
 	"github.com/IBM/sarama"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 
@@ -84,11 +83,11 @@ func WrapSyncProducer(saramaConfig *sarama.Config, producer sarama.SyncProducer,
 		saramaConfig = sarama.NewConfig()
 	}
 
-	publishDuration, _ := defaultMeter.Float64Histogram(
+	publishDuration, _ := cfg.Meter.Float64Histogram(
 		"messaging.client.operation.duration",
 		metric.WithUnit("s"),
 	)
-	publishCount, _ := defaultMeter.Int64Counter(
+	publishCount, _ := cfg.Meter.Int64Counter(
 		"messaging.client.published.messages",
 	)
 
@@ -164,11 +163,11 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 		saramaConfig = sarama.NewConfig()
 	}
 
-	publishDuration, _ := defaultMeter.Float64Histogram(
+	publishDuration, _ := cfg.Meter.Float64Histogram(
 		"messaging.client.operation.duration",
 		metric.WithUnit("s"),
 	)
-	publishCount, _ := defaultMeter.Int64Counter(
+	publishCount, _ := cfg.Meter.Int64Counter(
 		"messaging.client.published.messages",
 	)
 
@@ -394,66 +393,4 @@ func finishProducerMetrics(count metric.Int64Counter, duration metric.Float64His
 			metric.WithAttributes(attrs...),
 		)
 	}
-}
-
-type MessageProcessOperation struct {
-	err bool
-	start time.Time
-	span trace.Span
-	topic string
-	partition string
-}
-
-func NewMessageProcessOperation(msg *sarama.ConsumerMessage) MessageProcessOperation {
-		// Extract a span context from message to link.
-		carrier := NewConsumerMessageCarrier(msg)
-		parentSpanContext := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
-
-		// Create a span.
-		attrs := []attribute.KeyValue{
-			semconv.MessagingSystem("kafka"),
-			semconv.MessagingDestinationKindTopic,
-			semconv.MessagingDestinationName(msg.Topic),
-			attribute.String("messaging.operation.name", "process"),
-			attribute.String("messaging.message.id", strconv.FormatInt(msg.Offset, 10)),
-			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
-		}
-		opts := []trace.SpanStartOption{
-			trace.WithAttributes(attrs...),
-			trace.WithSpanKind(trace.SpanKindConsumer),
-			trace.WithLinks(trace.LinkFromContext(parentSpanContext)),
-		}
-		_, span := otel.GetTracerProvider().Tracer(defaultTracerName, trace.WithInstrumentationVersion(Version())).Start(parentSpanContext, fmt.Sprintf("%s process", msg.Topic), opts...)
-
-	return MessageProcessOperation{
-		span: span,
-		topic: msg.Topic,
-		partition: strconv.FormatInt(int64(msg.Partition), 10),
-		start: time.Now(),
-	}
-}
-
-func (msg *MessageProcessOperation) SetError() {
-	msg.err = true
-}
-
-func (msg *MessageProcessOperation) Stop() {
-	msg.span.End()
-
-	attributes := attribute.NewSet(
-			semconv.MessagingSystem("kafka"),
-			semconv.MessagingDestinationKindTopic,
-			semconv.MessagingDestinationName(msg.topic),
-			attribute.String("messaging.operation.name", "process"),
-			attribute.String("messaging.destination.partition.id", msg.partition),
-		)
-
-	// Creates the Counter instrument
-	processDuration, _ := defaultMeter.Float64Histogram(
-		"messaging.client.process.duration",
-		metric.WithUnit("s"),
-	)
-
-	// Add to our counter with an attribute
-	processDuration.Record(context.Background(), time.Now().Sub(msg.start).Seconds(), metric.WithAttributeSet(attributes))
 }

@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -26,13 +27,13 @@ import (
 const defaultTracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/IBM/sarama/otelsarama"
 const defaultMeterName = defaultTracerName
 
-var defaultMeter = otel.Meter(defaultMeterName)
-
 type config struct {
 	TracerProvider trace.TracerProvider
+	MeterProvider  metric.MeterProvider
 	Propagators    propagation.TextMapPropagator
 
 	Tracer trace.Tracer
+	Meter  metric.Meter
 
 	ServerAddress string
 	ServerPort    int
@@ -43,6 +44,7 @@ func newConfig(opts ...Option) config {
 	cfg := config{
 		Propagators:    otel.GetTextMapPropagator(),
 		TracerProvider: otel.GetTracerProvider(),
+		MeterProvider:  otel.GetMeterProvider(),
 	}
 	for _, opt := range opts {
 		opt.apply(&cfg)
@@ -51,6 +53,11 @@ func newConfig(opts ...Option) config {
 	cfg.Tracer = cfg.TracerProvider.Tracer(
 		defaultTracerName,
 		trace.WithInstrumentationVersion(Version()),
+	)
+
+	cfg.Meter = cfg.MeterProvider.Meter(
+		defaultMeterName,
+		metric.WithInstrumentationVersion(Version()),
 	)
 
 	return cfg

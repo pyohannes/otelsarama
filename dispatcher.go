@@ -42,7 +42,7 @@ type consumerMessagesDispatcherWrapper struct {
 }
 
 func newConsumerMessagesDispatcherWrapper(d consumerMessagesDispatcher, cfg config) *consumerMessagesDispatcherWrapper {
-	receiveDuration, _ := defaultMeter.Float64Histogram(
+	receiveDuration, _ := cfg.Meter.Float64Histogram(
 		"messaging.client.operation.duration",
 		metric.WithUnit("s"),
 	)
@@ -74,35 +74,25 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 		// Create a span.
 		attrs := []attribute.KeyValue{
 			semconv.MessagingSystem("kafka"),
-			semconv.MessagingDestinationKindTopic,
 			semconv.MessagingDestinationName(msg.Topic),
 			attribute.String("messaging.operation.name", "receive"),
-			attribute.String("messaging.message.id", strconv.FormatInt(msg.Offset, 10)),
 			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
 		}
+		spanAttrs := append(attrs, attribute.String("messaging.message.id", strconv.FormatInt(msg.Offset, 10)))
+
 		opts := []trace.SpanStartOption{
-			trace.WithAttributes(attrs...),
+			trace.WithAttributes(spanAttrs...),
 			trace.WithLinks(trace.LinkFromContext(parentSpanContext)),
 		}
-		newCtx, span := w.cfg.Tracer.Start(parentSpanContext, fmt.Sprintf("%s receive", msg.Topic), opts...)
-
-		// Inject current span context, so consumers can use it to propagate span.
-		w.cfg.Propagators.Inject(newCtx, carrier)
+		_, span := w.cfg.Tracer.Start(parentSpanContext, fmt.Sprintf("%s receive", msg.Topic), opts...)
 
 		// Send messages back to user.
 		w.messages <- msg
 
 		span.End()
 
-		attributes := attribute.NewSet(
-			semconv.MessagingSystem("kafka"),
-			semconv.MessagingDestinationName(msg.Topic),
-			attribute.String("messaging.operation.name", "receive"),
-			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
-		)
-
 		// Add to our counter with an attribute
-		w.receiveDuration.Record(context.Background(), time.Now().Sub(start).Seconds(), metric.WithAttributeSet(attributes))
+		w.receiveDuration.Record(context.Background(), time.Now().Sub(start).Seconds(), metric.WithAttributes(attrs...))
 	}
 	close(w.messages)
 }
