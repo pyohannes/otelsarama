@@ -15,18 +15,27 @@
 package otelsarama
 
 import (
+	"strconv"
+	"strings"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const defaultTracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/IBM/sarama/otelsarama"
+const defaultMeterName = defaultTracerName
+
+var defaultMeter = otel.Meter(defaultMeterName)
 
 type config struct {
 	TracerProvider trace.TracerProvider
 	Propagators    propagation.TextMapPropagator
 
 	Tracer trace.Tracer
+
+	ServerAddress string
+	ServerPort    int
 }
 
 // newConfig returns a config with all Options set.
@@ -75,6 +84,27 @@ func WithPropagators(propagators propagation.TextMapPropagator) Option {
 	return optionFunc(func(cfg *config) {
 		if propagators != nil {
 			cfg.Propagators = propagators
+		}
+	})
+}
+
+// WithPropagators specifies propagators to use for extracting
+// information from the HTTP requests. If none are specified, global
+// ones will be used.
+func WithBrokerAddresses(addresses []string) Option {
+	return optionFunc(func(cfg *config) {
+		if len(addresses) == 1 {
+			uriParts := strings.Split(addresses[0], ":")
+
+			cfg.ServerAddress = uriParts[0]
+
+			if len(uriParts) > 1 {
+				if iPort, err := strconv.Atoi(uriParts[1]); err == nil {
+					cfg.ServerPort = iPort
+				}
+			}
+		} else {
+			cfg.ServerAddress = strings.Join(addresses, ";")
 		}
 	})
 }

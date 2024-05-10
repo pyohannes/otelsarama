@@ -18,10 +18,12 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/IBM/sarama"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -34,13 +36,21 @@ type consumerMessagesDispatcherWrapper struct {
 	d        consumerMessagesDispatcher
 	messages chan *sarama.ConsumerMessage
 
+	receiveDuration metric.Float64Histogram
+
 	cfg config
 }
 
 func newConsumerMessagesDispatcherWrapper(d consumerMessagesDispatcher, cfg config) *consumerMessagesDispatcherWrapper {
+	receiveDuration, _ := defaultMeter.Float64Histogram(
+		"messaging.client.operation.duration",
+		metric.WithUnit("s"),
+	)
+
 	return &consumerMessagesDispatcherWrapper{
 		d:        d,
 		messages: make(chan *sarama.ConsumerMessage),
+		receiveDuration: receiveDuration,
 		cfg:      cfg,
 	}
 }
@@ -55,6 +65,8 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 	msgs := w.d.Messages()
 
 	for msg := range msgs {
+		start := time.Now()
+
 		// Extract a span context from message to link.
 		carrier := NewConsumerMessageCarrier(msg)
 		parentSpanContext := w.cfg.Propagators.Extract(context.Background(), carrier)
@@ -64,13 +76,13 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 			semconv.MessagingSystem("kafka"),
 			semconv.MessagingDestinationKindTopic,
 			semconv.MessagingDestinationName(msg.Topic),
-			semconv.MessagingOperationReceive,
-			semconv.MessagingMessageID(strconv.FormatInt(msg.Offset, 10)),
-			semconv.MessagingKafkaSourcePartition(int(msg.Partition)),
+			attribute.String("messaging.operation.name", "receive"),
+			attribute.String("messaging.message.id", strconv.FormatInt(msg.Offset, 10)),
+			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
 		}
 		opts := []trace.SpanStartOption{
 			trace.WithAttributes(attrs...),
-			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithLinks(trace.LinkFromContext(parentSpanContext)),
 		}
 		newCtx, span := w.cfg.Tracer.Start(parentSpanContext, fmt.Sprintf("%s receive", msg.Topic), opts...)
 
@@ -81,6 +93,16 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 		w.messages <- msg
 
 		span.End()
+
+		attributes := attribute.NewSet(
+			semconv.MessagingSystem("kafka"),
+			semconv.MessagingDestinationName(msg.Topic),
+			attribute.String("messaging.operation.name", "receive"),
+			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
+		)
+
+		// Add to our counter with an attribute
+		w.receiveDuration.Record(context.Background(), time.Now().Sub(start).Seconds(), metric.WithAttributeSet(attributes))
 	}
 	close(w.messages)
 }
