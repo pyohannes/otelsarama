@@ -37,6 +37,7 @@ type consumerMessagesDispatcherWrapper struct {
 	messages chan *sarama.ConsumerMessage
 
 	receiveDuration metric.Float64Histogram
+	defaultAttributes  []attribute.KeyValue
 
 	cfg config
 }
@@ -47,10 +48,22 @@ func newConsumerMessagesDispatcherWrapper(d consumerMessagesDispatcher, cfg conf
 		metric.WithUnit("s"),
 	)
 
+	defaultAttributes := []attribute.KeyValue{
+		semconv.MessagingSystem("kafka"),
+		attribute.String("messaging.operation.name", "receive"),
+	}	
+	if cfg.ServerAddress != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("server.address", cfg.ServerAddress))
+	}
+	if cfg.ServerPort != 0 {
+		defaultAttributes = append(defaultAttributes, attribute.Int("server.port", cfg.ServerPort))
+	}
+
 	return &consumerMessagesDispatcherWrapper{
 		d:        d,
 		messages: make(chan *sarama.ConsumerMessage),
 		receiveDuration: receiveDuration,
+		defaultAttributes: defaultAttributes,
 		cfg:      cfg,
 	}
 }
@@ -72,12 +85,10 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 		parentSpanContext := w.cfg.Propagators.Extract(context.Background(), carrier)
 
 		// Create a span.
-		attrs := []attribute.KeyValue{
-			semconv.MessagingSystem("kafka"),
+		attrs := append(w.defaultAttributes,
 			semconv.MessagingDestinationName(msg.Topic),
-			attribute.String("messaging.operation.name", "receive"),
 			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
-		}
+		)
 		spanAttrs := append(attrs, attribute.String("messaging.message.id", strconv.FormatInt(msg.Offset, 10)))
 
 		opts := []trace.SpanStartOption{

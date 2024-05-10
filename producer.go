@@ -39,17 +39,18 @@ type syncProducer struct {
 
 	metricPublishCount metric.Int64Counter
 	metricPublishDuration metric.Float64Histogram
+	defaultAttributes []attribute.KeyValue
 }
 
 // SendMessage calls sarama.SyncProducer.SendMessage and traces the request.
 func (p *syncProducer) SendMessage(msg *sarama.ProducerMessage) (partition int32, offset int64, err error) {
 	start := time.Now()
-	span := startProducerSpan(p.cfg, p.saramaConfig.Version, msg)
+	span := startProducerSpan(p.cfg, p.saramaConfig.Version, msg, p.defaultAttributes)
 
 	partition, offset, err = p.SyncProducer.SendMessage(msg)
 
 	finishProducerSpan(span, partition, offset, err)
-	finishProducerMetrics(p.metricPublishCount, p.metricPublishDuration, 1, start, msg.Topic, err)
+	finishProducerMetrics(p.metricPublishCount, p.metricPublishDuration, 1, start, msg.Topic, p.defaultAttributes, err)
 
 	return partition, offset, err
 }
@@ -60,7 +61,7 @@ func (p *syncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
 	// treated individually, so we create a span for each one
 	spans := make([]trace.Span, len(msgs))
 	for i, msg := range msgs {
-		spans[i] = startProducerSpan(p.cfg, p.saramaConfig.Version, msg)
+		spans[i] = startProducerSpan(p.cfg, p.saramaConfig.Version, msg, p.defaultAttributes)
 	}
 
 	start := time.Now()
@@ -70,7 +71,7 @@ func (p *syncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
 		finishProducerSpan(span, msgs[i].Partition, msgs[i].Offset, err)
 	}
 
-	finishProducerMetrics(p.metricPublishCount, p.metricPublishDuration, 1, start, msgs[0].Topic, err)
+	finishProducerMetrics(p.metricPublishCount, p.metricPublishDuration, 1, start, msgs[0].Topic, p.defaultAttributes, err)
 
 	return err
 }
@@ -91,12 +92,24 @@ func WrapSyncProducer(saramaConfig *sarama.Config, producer sarama.SyncProducer,
 		"messaging.client.published.messages",
 	)
 
+	defaultAttributes := []attribute.KeyValue{
+		semconv.MessagingSystem("kafka"),
+		attribute.String("messaging.operation.name", "publish"),
+	}
+	if cfg.ServerAddress != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("server.address", cfg.ServerAddress))
+	}
+	if cfg.ServerPort != 0 {
+		defaultAttributes = append(defaultAttributes, attribute.Int("server.port", cfg.ServerPort))
+	}
+
 	return &syncProducer{
 		SyncProducer: producer,
 		cfg:          cfg,
 		saramaConfig: saramaConfig,
 		metricPublishDuration: publishDuration,
 		metricPublishCount: publishCount,
+		defaultAttributes: defaultAttributes,
 	}
 }
 
@@ -111,6 +124,7 @@ type asyncProducer struct {
 
 	metricPublishCount metric.Int64Counter
 	metricPublishDuration metric.Float64Histogram
+	defaultAttributes []attribute.KeyValue
 }
 
 // Input returns the input channel.
@@ -171,6 +185,17 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 		"messaging.client.published.messages",
 	)
 
+	defaultAttributes := []attribute.KeyValue{
+		semconv.MessagingSystem("kafka"),
+		attribute.String("messaging.operation.name", "publish"),
+	}
+	if cfg.ServerAddress != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("server.address", cfg.ServerAddress))
+	}
+	if cfg.ServerPort != 0 {
+		defaultAttributes = append(defaultAttributes, attribute.Int("server.port", cfg.ServerPort))
+	}
+
 	wrapped := &asyncProducer{
 		AsyncProducer: p,
 		input:         make(chan *sarama.ProducerMessage),
@@ -181,6 +206,7 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 		closeAsyncSig: make(chan struct{}),
 		metricPublishDuration: publishDuration,
 		metricPublishCount: publishCount,
+		defaultAttributes: defaultAttributes,
 	}
 
 	var (
@@ -202,7 +228,7 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 				if !ok {
 					continue // wait for closeAsyncSig
 				}
-				span := startProducerSpan(cfg, saramaConfig.Version, msg)
+				span := startProducerSpan(cfg, saramaConfig.Version, msg, wrapped.defaultAttributes)
 
 				// Create message context, backend message metadata
 				mc := producerMessageContext{
@@ -223,7 +249,7 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 					// be done.
 					mc.span.End()
 
-					finishProducerMetrics(wrapped.metricPublishCount, nil, 1, mc.start, msg.Topic, nil)
+					finishProducerMetrics(wrapped.metricPublishCount, nil, 1, mc.start, msg.Topic, wrapped.defaultAttributes, nil)
 				}
 
 				p.Input() <- msg
@@ -248,7 +274,7 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 			if mc, ok := producerMessageContexts[key]; ok {
 				delete(producerMessageContexts, key)
 				finishProducerSpan(mc.span, msg.Partition, msg.Offset, nil)
-				finishProducerMetrics(wrapped.metricPublishCount, wrapped.metricPublishDuration, 1, mc.start, msg.Topic, nil)
+				finishProducerMetrics(wrapped.metricPublishCount, wrapped.metricPublishDuration, 1, mc.start, msg.Topic, wrapped.defaultAttributes, nil)
 				msg.Metadata = mc.metadataBackup // Restore message metadata
 			}
 			mtx.Unlock()
@@ -269,7 +295,7 @@ func WrapAsyncProducer(saramaConfig *sarama.Config, p sarama.AsyncProducer, opts
 			if mc, ok := producerMessageContexts[key]; ok {
 				delete(producerMessageContexts, key)
 				finishProducerSpan(mc.span, errMsg.Msg.Partition, errMsg.Msg.Offset, errMsg.Err)
-				finishProducerMetrics(wrapped.metricPublishCount, wrapped.metricPublishDuration, 1, mc.start, errMsg.Msg.Topic, errMsg.Err)
+				finishProducerMetrics(wrapped.metricPublishCount, wrapped.metricPublishDuration, 1, mc.start, errMsg.Msg.Topic, wrapped.defaultAttributes, errMsg.Err)
 				errMsg.Msg.Metadata = mc.metadataBackup // Restore message metadata
 			}
 			mtx.Unlock()
@@ -323,23 +349,17 @@ func msgPayloadSize(msg *sarama.ProducerMessage, kafkaVersion sarama.KafkaVersio
 	return size
 }
 
-func startProducerSpan(cfg config, version sarama.KafkaVersion, msg *sarama.ProducerMessage) trace.Span {
-	fmt.Println("### startProducerSpan")
+func startProducerSpan(cfg config, version sarama.KafkaVersion, msg *sarama.ProducerMessage, defaultAttributes []attribute.KeyValue) trace.Span {
 	// If there's a span context in the message, use that as the parent context.
 	carrier := NewProducerMessageCarrier(msg)
 	ctx := cfg.Propagators.Extract(context.Background(), carrier)
 
 	// Create a span.
-	attrs := []attribute.KeyValue{
-		semconv.MessagingSystem("kafka"),
+	attrs := append(defaultAttributes,
 		semconv.MessagingDestinationName(msg.Topic),
-		attribute.String("messaging.operation.name", "publish"),
 		attribute.Int("messaging.message.body.size", msgPayloadSize(msg, version)),
-		attribute.String("server.address", cfg.ServerAddress),
-		attribute.Int("server.port", cfg.ServerPort),
-	}
-	// messaging.client.id
-	// messaging.message.id
+	)
+	// TODO: messaging.client.id
 	opts := []trace.SpanStartOption{
 		trace.WithAttributes(attrs...),
 		trace.WithSpanKind(trace.SpanKindProducer),
@@ -355,8 +375,6 @@ func startProducerSpan(cfg config, version sarama.KafkaVersion, msg *sarama.Prod
 }
 
 func finishProducerSpan(span trace.Span, partition int32, offset int64, err error) {
-	fmt.Println("### finishProducerSpan")
-
 	span.SetAttributes(
 		semconv.MessagingMessageID(strconv.FormatInt(offset, 10)),
 		semconv.MessagingKafkaDestinationPartition(int(partition)),
@@ -368,12 +386,10 @@ func finishProducerSpan(span trace.Span, partition int32, offset int64, err erro
 
 }
 
-func finishProducerMetrics(count metric.Int64Counter, duration metric.Float64Histogram, numMessages int64, start time.Time, topic string, err error) {
-	attrs := []attribute.KeyValue{
-		semconv.MessagingSystem("kafka"),
+func finishProducerMetrics(count metric.Int64Counter, duration metric.Float64Histogram, numMessages int64, start time.Time, topic string, defaultAttributes []attribute.KeyValue, err error) {
+	attrs := append(defaultAttributes,
 		semconv.MessagingDestinationName(topic),
-		attribute.String("messaging.operation.name", "publish"),
-	}
+	)
 
 	if err != nil {
 		attrs = append(attrs, attribute.String("error.type", err.Error()))

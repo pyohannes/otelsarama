@@ -34,7 +34,6 @@ type MessageProcessInstrumenter struct {
 	cfg config
 
 	metricProcessDuration metric.Float64Histogram
-
 	defaultAttributes  []attribute.KeyValue
 }
 
@@ -50,6 +49,12 @@ func NewMessageProcessInstrumenter(opts ...Option) MessageProcessInstrumenter {
 		semconv.MessagingSystem("kafka"),
 		attribute.String("messaging.operation.name", "process"),
 	}	
+	if cfg.ServerAddress != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("server.address", cfg.ServerAddress))
+	}
+	if cfg.ServerPort != 0 {
+		defaultAttributes = append(defaultAttributes, attribute.Int("server.port", cfg.ServerPort))
+	}
 
 	return MessageProcessInstrumenter {
 		cfg: cfg,
