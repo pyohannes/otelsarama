@@ -92,6 +92,7 @@ func (instrumenter *MessageProcessInstrumenter) NewProcessOperation(msg *sarama.
 		_, span := instrumenter.cfg.Tracer.Start(parentSpanContext, fmt.Sprintf("%s process", msg.Topic), opts...)
 
 	return MessageProcessOperation{
+		instrumenter: *instrumenter,
 		span: span,
 		topic: msg.Topic,
 		partition: strconv.FormatInt(int64(msg.Partition), 10),
