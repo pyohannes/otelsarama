@@ -18,10 +18,12 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/IBM/sarama"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -34,13 +36,43 @@ type consumerMessagesDispatcherWrapper struct {
 	d        consumerMessagesDispatcher
 	messages chan *sarama.ConsumerMessage
 
+	receiveDuration    metric.Float64Histogram
+	consumedMessages   metric.Int64Counter
+	defaultAttributes  []attribute.KeyValue
+
 	cfg config
 }
 
 func newConsumerMessagesDispatcherWrapper(d consumerMessagesDispatcher, cfg config) *consumerMessagesDispatcherWrapper {
+	receiveDuration, _ := cfg.Meter.Float64Histogram(
+		"messaging.client.operation.duration",
+		metric.WithUnit("s"),
+	)
+
+	consumedMessages, _ := cfg.Meter.Int64Counter(
+		"messaging.client.consumed.messages",
+	)
+
+	defaultAttributes := []attribute.KeyValue{
+		semconv.MessagingSystem("kafka"),
+		attribute.String("messaging.operation.name", "receive"),
+	}	
+	if cfg.ServerAddress != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("server.address", cfg.ServerAddress))
+	}
+	if cfg.ServerPort != 0 {
+		defaultAttributes = append(defaultAttributes, attribute.Int("server.port", cfg.ServerPort))
+	}
+	if cfg.ConsumerGroupID != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("messaging.consumer.group.name", cfg.ConsumerGroupID))
+	}
+
 	return &consumerMessagesDispatcherWrapper{
 		d:        d,
 		messages: make(chan *sarama.ConsumerMessage),
+		receiveDuration: receiveDuration,
+		consumedMessages: consumedMessages,
+		defaultAttributes: defaultAttributes,
 		cfg:      cfg,
 	}
 }
@@ -55,32 +87,33 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 	msgs := w.d.Messages()
 
 	for msg := range msgs {
+		start := time.Now()
+
 		// Extract a span context from message to link.
 		carrier := NewConsumerMessageCarrier(msg)
 		parentSpanContext := w.cfg.Propagators.Extract(context.Background(), carrier)
 
 		// Create a span.
-		attrs := []attribute.KeyValue{
-			semconv.MessagingSystem("kafka"),
-			semconv.MessagingDestinationKindTopic,
+		attrs := append(w.defaultAttributes,
 			semconv.MessagingDestinationName(msg.Topic),
-			semconv.MessagingOperationReceive,
-			semconv.MessagingMessageID(strconv.FormatInt(msg.Offset, 10)),
-			semconv.MessagingKafkaSourcePartition(int(msg.Partition)),
-		}
-		opts := []trace.SpanStartOption{
-			trace.WithAttributes(attrs...),
-			trace.WithSpanKind(trace.SpanKindConsumer),
-		}
-		newCtx, span := w.cfg.Tracer.Start(parentSpanContext, fmt.Sprintf("%s receive", msg.Topic), opts...)
+			attribute.String("messaging.destination.partition.id", strconv.FormatInt(int64(msg.Partition), 10)),
+		)
+		spanAttrs := append(attrs, attribute.String("messaging.message.id", strconv.FormatInt(msg.Offset, 10)))
 
-		// Inject current span context, so consumers can use it to propagate span.
-		w.cfg.Propagators.Inject(newCtx, carrier)
+		opts := []trace.SpanStartOption{
+			trace.WithAttributes(spanAttrs...),
+			trace.WithLinks(trace.LinkFromContext(parentSpanContext)),
+		}
+		_, span := w.cfg.Tracer.Start(parentSpanContext, fmt.Sprintf("%s receive", msg.Topic), opts...)
 
 		// Send messages back to user.
 		w.messages <- msg
 
 		span.End()
+
+		// Add to our counter with an attribute
+		w.receiveDuration.Record(context.Background(), time.Now().Sub(start).Seconds(), metric.WithAttributes(attrs...))
+		w.consumedMessages.Add(context.Background(), 1, metric.WithAttributes(attrs...))
 	}
 	close(w.messages)
 }

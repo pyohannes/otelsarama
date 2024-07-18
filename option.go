@@ -15,18 +15,29 @@
 package otelsarama
 
 import (
+	"strconv"
+	"strings"
+
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const defaultTracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/IBM/sarama/otelsarama"
+const defaultMeterName = defaultTracerName
 
 type config struct {
 	TracerProvider trace.TracerProvider
+	MeterProvider  metric.MeterProvider
 	Propagators    propagation.TextMapPropagator
 
 	Tracer trace.Tracer
+	Meter  metric.Meter
+
+	ServerAddress   string
+	ServerPort      int
+	ConsumerGroupID string
 }
 
 // newConfig returns a config with all Options set.
@@ -34,6 +45,7 @@ func newConfig(opts ...Option) config {
 	cfg := config{
 		Propagators:    otel.GetTextMapPropagator(),
 		TracerProvider: otel.GetTracerProvider(),
+		MeterProvider:  otel.GetMeterProvider(),
 	}
 	for _, opt := range opts {
 		opt.apply(&cfg)
@@ -42,6 +54,11 @@ func newConfig(opts ...Option) config {
 	cfg.Tracer = cfg.TracerProvider.Tracer(
 		defaultTracerName,
 		trace.WithInstrumentationVersion(Version()),
+	)
+
+	cfg.Meter = cfg.MeterProvider.Meter(
+		defaultMeterName,
+		metric.WithInstrumentationVersion(Version()),
 	)
 
 	return cfg
@@ -76,5 +93,29 @@ func WithPropagators(propagators propagation.TextMapPropagator) Option {
 		if propagators != nil {
 			cfg.Propagators = propagators
 		}
+	})
+}
+
+func WithBrokerAddresses(addresses []string) Option {
+	return optionFunc(func(cfg *config) {
+		if len(addresses) == 1 {
+			uriParts := strings.Split(addresses[0], ":")
+
+			cfg.ServerAddress = uriParts[0]
+
+			if len(uriParts) > 1 {
+				if iPort, err := strconv.Atoi(uriParts[1]); err == nil {
+					cfg.ServerPort = iPort
+				}
+			}
+		} else {
+			cfg.ServerAddress = strings.Join(addresses, ";")
+		}
+	})
+}
+
+func WithConsumerGroup(groupID string) Option {
+	return optionFunc(func(cfg *config) {
+		cfg.ConsumerGroupID = groupID
 	})
 }
