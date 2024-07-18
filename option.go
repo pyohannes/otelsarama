@@ -35,8 +35,9 @@ type config struct {
 	Tracer trace.Tracer
 	Meter  metric.Meter
 
-	ServerAddress string
-	ServerPort    int
+	ServerAddress   string
+	ServerPort      int
+	ConsumerGroupID string
 }
 
 // newConfig returns a config with all Options set.
@@ -95,9 +96,6 @@ func WithPropagators(propagators propagation.TextMapPropagator) Option {
 	})
 }
 
-// WithPropagators specifies propagators to use for extracting
-// information from the HTTP requests. If none are specified, global
-// ones will be used.
 func WithBrokerAddresses(addresses []string) Option {
 	return optionFunc(func(cfg *config) {
 		if len(addresses) == 1 {
@@ -113,5 +111,11 @@ func WithBrokerAddresses(addresses []string) Option {
 		} else {
 			cfg.ServerAddress = strings.Join(addresses, ";")
 		}
+	})
+}
+
+func WithConsumerGroup(groupID string) Option {
+	return optionFunc(func(cfg *config) {
+		cfg.ConsumerGroupID = groupID
 	})
 }

@@ -36,7 +36,8 @@ type consumerMessagesDispatcherWrapper struct {
 	d        consumerMessagesDispatcher
 	messages chan *sarama.ConsumerMessage
 
-	receiveDuration metric.Float64Histogram
+	receiveDuration    metric.Float64Histogram
+	consumedMessages   metric.Int64Counter
 	defaultAttributes  []attribute.KeyValue
 
 	cfg config
@@ -46,6 +47,10 @@ func newConsumerMessagesDispatcherWrapper(d consumerMessagesDispatcher, cfg conf
 	receiveDuration, _ := cfg.Meter.Float64Histogram(
 		"messaging.client.operation.duration",
 		metric.WithUnit("s"),
+	)
+
+	consumedMessages, _ := cfg.Meter.Int64Counter(
+		"messaging.client.consumed.messages",
 	)
 
 	defaultAttributes := []attribute.KeyValue{
@@ -58,11 +63,15 @@ func newConsumerMessagesDispatcherWrapper(d consumerMessagesDispatcher, cfg conf
 	if cfg.ServerPort != 0 {
 		defaultAttributes = append(defaultAttributes, attribute.Int("server.port", cfg.ServerPort))
 	}
+	if cfg.ConsumerGroupID != "" {
+		defaultAttributes = append(defaultAttributes, attribute.String("messaging.consumer.group.name", cfg.ConsumerGroupID))
+	}
 
 	return &consumerMessagesDispatcherWrapper{
 		d:        d,
 		messages: make(chan *sarama.ConsumerMessage),
 		receiveDuration: receiveDuration,
+		consumedMessages: consumedMessages,
 		defaultAttributes: defaultAttributes,
 		cfg:      cfg,
 	}
@@ -104,6 +113,7 @@ func (w *consumerMessagesDispatcherWrapper) Run() {
 
 		// Add to our counter with an attribute
 		w.receiveDuration.Record(context.Background(), time.Now().Sub(start).Seconds(), metric.WithAttributes(attrs...))
+		w.consumedMessages.Add(context.Background(), 1, metric.WithAttributes(attrs...))
 	}
 	close(w.messages)
 }
